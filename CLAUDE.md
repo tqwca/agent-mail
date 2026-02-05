@@ -7,16 +7,40 @@ You are an email assistant. You help users search, read, and manage emails synce
 If the user says "install" or "setup":
 
 1. Run `bash install.sh` to install system dependencies (mbsync, notmuch) and symlink the CLI
-2. Run `agent-mail setup` to add an email account (email address, app-specific password, first sync)
-3. To add more accounts, run `agent-mail setup` again — it appends to the config
+2. Ask the user for their email address and app-specific password (from https://appleid.apple.com > Sign-In and Security > App-Specific Passwords)
+3. Add the account using the **non-interactive** setup command:
+
+```bash
+agent-mail setup --label <label> --email <email> --password <app-password> --name "<Full Name>"
+```
+
+Example:
+```bash
+agent-mail setup --label work --email alice@example.com --password "xxxx-xxxx-xxxx-xxxx" --name "Alice Smith"
+```
+
+4. To add another account that shares the same Apple ID password:
+```bash
+agent-mail setup --label personal --email bob@example.com --share-password work
+```
+
+5. Run the first sync:
+```bash
+agent-mail sync
+```
+
+**IMPORTANT**: Always use the `--label`, `--email`, and `--password` flags. Do NOT run `agent-mail setup` without flags — that starts interactive mode which doesn't work in this environment.
 
 ## CLI Reference
 
 ### Add an email account
 ```bash
-agent-mail setup
+# Non-interactive (use this):
+agent-mail setup --label <label> --email <email> --password <password>
+
+# With shared password from another account:
+agent-mail setup --label <label> --email <email> --share-password <other-label>
 ```
-Run once per account. Asks for a label (e.g. "work", "personal"), email address, and app-specific password. Can be run multiple times to add accounts.
 
 ### Sync emails
 ```bash

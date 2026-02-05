@@ -20,16 +20,18 @@ Claude reads CLAUDE.md, runs the install script, walks you through account setup
 bash install.sh
 
 # 2. Add your first email account
-agent-mail setup
+agent-mail setup --label work --email you@example.com --password "xxxx-xxxx-xxxx-xxxx" --name "Your Name"
 
-# 3. Add another account (optional — run setup again)
-agent-mail setup
+# 3. Add another account (optional — shares password if same Apple ID)
+agent-mail setup --label personal --email other@example.com --share-password work
 
 # 4. Sync and search
 agent-mail sync
 agent-mail recent
 agent-mail search "from:someone@example.com"
 ```
+
+Setup also works interactively (just run `agent-mail setup` with no flags).
 
 ## Prerequisites
 
@@ -42,7 +44,7 @@ agent-mail search "from:someone@example.com"
 
 | Command | Description |
 |---------|-------------|
-| `agent-mail setup` | Add an email account (run again to add more) |
+| `agent-mail setup --label <l> --email <e> --password <p>` | Add an email account |
 | `agent-mail sync` | Sync all accounts via mbsync |
 | `agent-mail search <query>` | Search with notmuch query syntax |
 | `agent-mail search <query> --thread` | Show full thread view |
@@ -74,11 +76,11 @@ If two accounts share the same Apple ID (e.g. two addresses on the same custom d
 
 ### What `agent-mail setup` does
 
-1. Asks for an account label and email address
-2. Appends an account block to `~/.mbsyncrc`
-3. Prompts for your app-specific password (or links to an existing one)
+1. Takes an account label, email address, and password (via flags or interactive prompts)
+2. Generates an account block from `config/mbsyncrc.template` and appends it to `~/.mbsyncrc`
+3. Saves the app-specific password to `~/.icloud-app-password-<label>` (or symlinks to another account's password with `--share-password`)
 4. Creates the account's mail directory under `~/Mail/<label>/`
-5. Initializes the notmuch database (first run only)
+5. Initializes the notmuch database and configures it non-interactively (first run only)
 
 ### Getting an App-Specific Password
 

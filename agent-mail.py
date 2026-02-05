@@ -48,15 +48,109 @@ def existing_accounts():
     return re.findall(r'^IMAPAccount\s+(\S+)', content, re.MULTILINE)
 
 
+def init_notmuch(email_addr, name=""):
+    """Initialize notmuch database non-interactively"""
+    notmuch_db = MAIL_DIR / ".notmuch"
+    if notmuch_db.exists():
+        return
+
+    MAIL_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Create the database with notmuch new
+    env = os.environ.copy()
+    env["NOTMUCH_DATABASE"] = str(MAIL_DIR)
+    subprocess.run(["notmuch", "new"], env=env, check=False)
+
+    # Configure via notmuch config set (works without interactive setup)
+    config_cmds = [
+        ["notmuch", "config", "set", "database.path", str(MAIL_DIR)],
+        ["notmuch", "config", "set", "user.primary_email", email_addr],
+        ["notmuch", "config", "set", "new.tags", "unread;inbox"],
+        ["notmuch", "config", "set", "search.exclude_tags", "deleted;spam"],
+        ["notmuch", "config", "set", "maildir.synchronize_flags", "true"],
+    ]
+    if name:
+        config_cmds.append(["notmuch", "config", "set", "user.name", name])
+
+    for cmd in config_cmds:
+        subprocess.run(cmd, check=False)
+
+    print(f"Initialized notmuch database at {MAIL_DIR}")
+
+
+def write_account_config(label, email_addr, password=None, share_password=None):
+    """Write mbsync config and password for an account (non-interactive)"""
+    # Generate account block from template
+    template_path = CONFIG_DIR / "mbsyncrc.template"
+    if not template_path.exists():
+        print(f"Template not found: {template_path}", file=sys.stderr)
+        sys.exit(1)
+
+    block = template_path.read_text()
+    block = block.replace("__LABEL__", label).replace("__EMAIL__", email_addr)
+
+    # Write to ~/.mbsyncrc
+    mbsyncrc_path = Path.home() / ".mbsyncrc"
+    accounts = existing_accounts()
+
+    if label in accounts:
+        # Remove existing block and replace
+        content = mbsyncrc_path.read_text()
+        pattern = rf'(# iCloud IMAP account: {re.escape(label)}\n)?IMAPAccount {re.escape(label)}\n.*?(?=\n# iCloud IMAP account:|\nIMAPAccount |\Z)'
+        content = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+        if content:
+            content += "\n\n"
+        content += block
+        mbsyncrc_path.write_text(content)
+    elif mbsyncrc_path.exists():
+        with open(mbsyncrc_path, 'a') as f:
+            f.write("\n" + block)
+    else:
+        mbsyncrc_path.write_text(block)
+
+    mbsyncrc_path.chmod(0o600)
+    print(f"Wrote account '{label}' to {mbsyncrc_path}")
+
+    # Handle password
+    password_path = Path.home() / f".icloud-app-password-{label}"
+    if password_path.exists():
+        print(f"{password_path} already exists, keeping it.")
+    elif share_password:
+        # Symlink to another account's password
+        source = Path.home() / f".icloud-app-password-{share_password}"
+        if source.exists():
+            password_path.symlink_to(source.name)
+            print(f"Linked {password_path.name} -> {source.name}")
+        else:
+            print(f"Warning: {source} not found, skipping password link", file=sys.stderr)
+    elif password:
+        password_path.write_text(password + "\n")
+        password_path.chmod(0o600)
+        print(f"Saved password to {password_path}")
+    # else: no password provided, user must create it manually
+
+    # Create Mail directory for this account
+    account_mail = MAIL_DIR / label
+    account_mail.mkdir(parents=True, exist_ok=True)
+
+
 def cmd_setup(args):
-    """Interactive first-time setup — add an email account"""
+    """Add an email account"""
+    # Non-interactive mode: all required args provided via flags
+    if args.label and args.email:
+        label = re.sub(r'[^a-z0-9-]', '-', args.label.lower())
+        write_account_config(label, args.email, password=args.password, share_password=args.share_password)
+        init_notmuch(args.email, name=args.name or "")
+        print(f"\nAccount '{label}' ready. Run: agent-mail sync")
+        return
+
+    # Interactive mode: prompt for everything
     print("=== agent-mail setup ===\n")
 
     accounts = existing_accounts()
     if accounts:
         print(f"Existing accounts: {', '.join(accounts)}\n")
 
-    # 1. Ask for label
     default_label = "icloud" if not accounts else ""
     label_prompt = f"Account label [{default_label}]: " if default_label else "Account label (e.g. work, personal): "
     label = input(label_prompt).strip() or default_label
@@ -72,86 +166,37 @@ def cmd_setup(args):
             print("Aborted.")
             return
 
-    # 2. Ask for email
     email_addr = input("iCloud email address: ").strip()
     if not email_addr:
         print("Email required.", file=sys.stderr)
         sys.exit(1)
 
-    # 3. Generate account block from template
-    template_path = CONFIG_DIR / "mbsyncrc.template"
-    if not template_path.exists():
-        print(f"Template not found: {template_path}", file=sys.stderr)
-        sys.exit(1)
-
-    block = template_path.read_text()
-    block = block.replace("__LABEL__", label).replace("__EMAIL__", email_addr)
-
-    # 4. Write to ~/.mbsyncrc
-    mbsyncrc_path = Path.home() / ".mbsyncrc"
-    if label in accounts:
-        # Remove existing block for this label and replace
-        content = mbsyncrc_path.read_text()
-        # Remove from "# iCloud IMAP account: <label>" or "IMAPAccount <label>" to next account or EOF
-        pattern = rf'(# iCloud IMAP account: {re.escape(label)}\n)?IMAPAccount {re.escape(label)}\n.*?(?=\n# iCloud IMAP account:|\nIMAPAccount |\Z)'
-        content = re.sub(pattern, '', content, flags=re.DOTALL).strip()
-        if content:
-            content += "\n\n"
-        content += block
-        mbsyncrc_path.write_text(content)
-    elif mbsyncrc_path.exists():
-        # Append
-        with open(mbsyncrc_path, 'a') as f:
-            f.write("\n" + block)
-    else:
-        mbsyncrc_path.write_text(block)
-
-    mbsyncrc_path.chmod(0o600)
-    print(f"Wrote account '{label}' to {mbsyncrc_path}")
-
-    # 5. App-specific password
+    # Prompt for password
+    password = None
+    other_passwords = list(Path.home().glob(".icloud-app-password-*"))
     password_path = Path.home() / f".icloud-app-password-{label}"
+
     if password_path.exists():
-        print(f"\n{password_path} already exists, skipping password setup.")
-    else:
-        # Check if another account's password exists to offer sharing
-        other_passwords = list(Path.home().glob(".icloud-app-password-*"))
-        if other_passwords:
-            share = input(f"\nUse same password as {other_passwords[0].name}? [Y/n] ").strip().lower()
-            if share != 'n':
-                password_path.symlink_to(other_passwords[0].name)
-                print(f"Linked {password_path} -> {other_passwords[0].name}")
-            else:
-                _prompt_password(password_path)
+        print(f"\n{password_path} already exists, keeping it.")
+    elif other_passwords:
+        share = input(f"\nUse same password as {other_passwords[0].name}? [Y/n] ").strip().lower()
+        if share != 'n':
+            write_account_config(label, email_addr, share_password=other_passwords[0].stem.replace("icloud-app-password-", ""))
+            init_notmuch(email_addr)
+            print(f"\nAccount '{label}' ready. Run: agent-mail sync")
+            return
         else:
             print("\nYou need an app-specific password from https://appleid.apple.com")
             print("  Sign in > Sign-In and Security > App-Specific Passwords")
-            _prompt_password(password_path)
-
-    # 6. Create Mail directory for this account
-    account_mail = MAIL_DIR / label
-    account_mail.mkdir(parents=True, exist_ok=True)
-
-    # 7. Initialize notmuch if needed
-    notmuch_db = MAIL_DIR / ".notmuch"
-    if not notmuch_db.exists():
-        print("\nInitializing notmuch database...")
-        env = os.environ.copy()
-        env["NOTMUCH_DATABASE"] = str(MAIL_DIR)
-        subprocess.run(["notmuch", "new"], env=env, check=False)
-
-    print(f"\nAccount '{label}' ready. Run: agent-mail sync")
-
-
-def _prompt_password(password_path):
-    """Prompt user for app-specific password and save it"""
-    app_password = input("\nPaste your app-specific password (or Enter to skip): ").strip()
-    if app_password:
-        password_path.write_text(app_password + "\n")
-        password_path.chmod(0o600)
-        print(f"Saved to {password_path}")
+            password = input("\nPaste your app-specific password (or Enter to skip): ").strip() or None
     else:
-        print(f"Skipped. Save it later to {password_path}")
+        print("\nYou need an app-specific password from https://appleid.apple.com")
+        print("  Sign in > Sign-In and Security > App-Specific Passwords")
+        password = input("\nPaste your app-specific password (or Enter to skip): ").strip() or None
+
+    write_account_config(label, email_addr, password=password)
+    init_notmuch(email_addr)
+    print(f"\nAccount '{label}' ready. Run: agent-mail sync")
 
 
 def cmd_sync(args):
@@ -287,7 +332,12 @@ def main():
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # setup
-    subparsers.add_parser('setup', help='Add an email account (re-run to add more)')
+    p_setup = subparsers.add_parser('setup', help='Add an email account (re-run to add more)')
+    p_setup.add_argument('--label', help='Account label (e.g. work, personal)')
+    p_setup.add_argument('--email', help='iCloud email address')
+    p_setup.add_argument('--password', help='App-specific password')
+    p_setup.add_argument('--share-password', metavar='LABEL', help='Share password with another account label')
+    p_setup.add_argument('--name', help='Your name (for notmuch config)')
 
     # sync
     subparsers.add_parser('sync', help='Sync all accounts via mbsync')
