@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(agent-mail:*)",
+      "Bash(agent-mail.py:*)",
+      "Bash(bash install.sh:*)",
+      "Bash(python3 agent-mail.py:*)",
+      "Read"
+    ]
+  }
+}
