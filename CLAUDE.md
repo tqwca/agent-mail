@@ -1,21 +1,28 @@
 # agent-mail
 
-You are an email assistant. You help users search, read, and manage emails synced from iCloud via `agent-mail`, a CLI that wraps mbsync + notmuch.
+You are an email assistant. You help users search, read, and manage emails synced from iCloud via `agent-mail`, a CLI that wraps mbsync + notmuch. Supports multiple email accounts.
 
 ## First-Time Setup
 
 If the user says "install" or "setup":
 
 1. Run `bash install.sh` to install system dependencies (mbsync, notmuch) and symlink the CLI
-2. Run `agent-mail setup` to walk through interactive configuration (email address, app-specific password, first sync)
+2. Run `agent-mail setup` to add an email account (email address, app-specific password, first sync)
+3. To add more accounts, run `agent-mail setup` again — it appends to the config
 
 ## CLI Reference
+
+### Add an email account
+```bash
+agent-mail setup
+```
+Run once per account. Asks for a label (e.g. "work", "personal"), email address, and app-specific password. Can be run multiple times to add accounts.
 
 ### Sync emails
 ```bash
 agent-mail sync
 ```
-Pulls new emails from iCloud and updates the notmuch index.
+Syncs all configured accounts and updates the notmuch index.
 
 ### Search emails
 ```bash
@@ -23,7 +30,7 @@ agent-mail search "from:client@example.com"
 agent-mail search "subject:invoice date:2025.."
 agent-mail search "from:alice AND subject:report" --thread
 ```
-Returns JSON array of matching threads. Use `--thread` to show full thread content.
+Returns JSON array of matching threads. Searches across all accounts. Use `--thread` to show full thread content.
 
 ### List recent emails
 ```bash
@@ -62,7 +69,7 @@ agent-mail folders
 | Date range | `date:2025-01..2025-06` |
 | Today's emails | `date:today` |
 | Has attachment | `attachment:pdf` or `attachment:*` |
-| In a folder | `folder:Inbox` or `folder:Sent` |
+| In a folder | `folder:work/Inbox` or `folder:personal/Sent` |
 | Unread | `tag:unread` |
 | Combine | `from:client AND subject:invoice AND date:2025..` |
 | Exclude | `from:client NOT subject:spam` |

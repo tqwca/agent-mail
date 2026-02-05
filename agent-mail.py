@@ -10,6 +10,7 @@ import subprocess
 import email
 import sys
 import os
+import re
 from pathlib import Path
 from email import policy
 
@@ -38,70 +39,119 @@ def parse_email_file(filepath):
         return email.message_from_binary_file(f, policy=policy.default)
 
 
+def existing_accounts():
+    """Parse ~/.mbsyncrc to find existing account labels"""
+    mbsyncrc_path = Path.home() / ".mbsyncrc"
+    if not mbsyncrc_path.exists():
+        return []
+    content = mbsyncrc_path.read_text()
+    return re.findall(r'^IMAPAccount\s+(\S+)', content, re.MULTILINE)
+
+
 def cmd_setup(args):
-    """Interactive first-time setup"""
+    """Interactive first-time setup — add an email account"""
     print("=== agent-mail setup ===\n")
 
-    # 1. Ask for email
-    email_addr = input("Your iCloud email address: ").strip()
+    accounts = existing_accounts()
+    if accounts:
+        print(f"Existing accounts: {', '.join(accounts)}\n")
+
+    # 1. Ask for label
+    default_label = "icloud" if not accounts else ""
+    label_prompt = f"Account label [{default_label}]: " if default_label else "Account label (e.g. work, personal): "
+    label = input(label_prompt).strip() or default_label
+    if not label:
+        print("Label required.", file=sys.stderr)
+        sys.exit(1)
+    label = re.sub(r'[^a-z0-9-]', '-', label.lower())
+
+    if label in accounts:
+        print(f"Account '{label}' already exists in ~/.mbsyncrc.")
+        overwrite = input("Replace it? [y/N] ").strip().lower()
+        if overwrite != 'y':
+            print("Aborted.")
+            return
+
+    # 2. Ask for email
+    email_addr = input("iCloud email address: ").strip()
     if not email_addr:
         print("Email required.", file=sys.stderr)
         sys.exit(1)
 
-    # 2. Generate mbsyncrc from template
+    # 3. Generate account block from template
     template_path = CONFIG_DIR / "mbsyncrc.template"
     if not template_path.exists():
         print(f"Template not found: {template_path}", file=sys.stderr)
         sys.exit(1)
 
-    mbsyncrc = template_path.read_text().replace("__EMAIL__", email_addr)
+    block = template_path.read_text()
+    block = block.replace("__LABEL__", label).replace("__EMAIL__", email_addr)
+
+    # 4. Write to ~/.mbsyncrc
     mbsyncrc_path = Path.home() / ".mbsyncrc"
-
-    if mbsyncrc_path.exists():
-        overwrite = input(f"{mbsyncrc_path} exists. Overwrite? [y/N] ").strip().lower()
-        if overwrite != 'y':
-            print("Keeping existing .mbsyncrc")
-        else:
-            mbsyncrc_path.write_text(mbsyncrc)
-            mbsyncrc_path.chmod(0o600)
-            print(f"Wrote {mbsyncrc_path}")
+    if label in accounts:
+        # Remove existing block for this label and replace
+        content = mbsyncrc_path.read_text()
+        # Remove from "# iCloud IMAP account: <label>" or "IMAPAccount <label>" to next account or EOF
+        pattern = rf'(# iCloud IMAP account: {re.escape(label)}\n)?IMAPAccount {re.escape(label)}\n.*?(?=\n# iCloud IMAP account:|\nIMAPAccount |\Z)'
+        content = re.sub(pattern, '', content, flags=re.DOTALL).strip()
+        if content:
+            content += "\n\n"
+        content += block
+        mbsyncrc_path.write_text(content)
+    elif mbsyncrc_path.exists():
+        # Append
+        with open(mbsyncrc_path, 'a') as f:
+            f.write("\n" + block)
     else:
-        mbsyncrc_path.write_text(mbsyncrc)
-        mbsyncrc_path.chmod(0o600)
-        print(f"Wrote {mbsyncrc_path}")
+        mbsyncrc_path.write_text(block)
 
-    # 3. App-specific password
-    password_path = Path.home() / ".icloud-app-password"
+    mbsyncrc_path.chmod(0o600)
+    print(f"Wrote account '{label}' to {mbsyncrc_path}")
+
+    # 5. App-specific password
+    password_path = Path.home() / f".icloud-app-password-{label}"
     if password_path.exists():
         print(f"\n{password_path} already exists, skipping password setup.")
     else:
-        print("\nYou need an app-specific password from https://appleid.apple.com")
-        print("  Sign in > Sign-In and Security > App-Specific Passwords")
-        app_password = input("\nPaste your app-specific password (or press Enter to skip): ").strip()
-        if app_password:
-            password_path.write_text(app_password + "\n")
-            password_path.chmod(0o600)
-            print(f"Saved to {password_path}")
+        # Check if another account's password exists to offer sharing
+        other_passwords = list(Path.home().glob(".icloud-app-password-*"))
+        if other_passwords:
+            share = input(f"\nUse same password as {other_passwords[0].name}? [Y/n] ").strip().lower()
+            if share != 'n':
+                password_path.symlink_to(other_passwords[0].name)
+                print(f"Linked {password_path} -> {other_passwords[0].name}")
+            else:
+                _prompt_password(password_path)
         else:
-            print(f"Skipped. Save it later to {password_path}")
+            print("\nYou need an app-specific password from https://appleid.apple.com")
+            print("  Sign in > Sign-In and Security > App-Specific Passwords")
+            _prompt_password(password_path)
 
-    # 4. Create Mail directory
-    MAIL_DIR.mkdir(exist_ok=True)
+    # 6. Create Mail directory for this account
+    account_mail = MAIL_DIR / label
+    account_mail.mkdir(parents=True, exist_ok=True)
 
-    # 5. Initialize notmuch
+    # 7. Initialize notmuch if needed
     notmuch_db = MAIL_DIR / ".notmuch"
     if not notmuch_db.exists():
         print("\nInitializing notmuch database...")
         env = os.environ.copy()
         env["NOTMUCH_DATABASE"] = str(MAIL_DIR)
-        subprocess.run(
-            ["notmuch", "new"],
-            env=env,
-            check=False
-        )
+        subprocess.run(["notmuch", "new"], env=env, check=False)
 
-    # 6. First sync
-    print("\nReady to sync. Run: agent-mail sync")
+    print(f"\nAccount '{label}' ready. Run: agent-mail sync")
+
+
+def _prompt_password(password_path):
+    """Prompt user for app-specific password and save it"""
+    app_password = input("\nPaste your app-specific password (or Enter to skip): ").strip()
+    if app_password:
+        password_path.write_text(app_password + "\n")
+        password_path.chmod(0o600)
+        print(f"Saved to {password_path}")
+    else:
+        print(f"Skipped. Save it later to {password_path}")
 
 
 def cmd_sync(args):
@@ -114,7 +164,6 @@ def cmd_sync(args):
 def cmd_search(args):
     """Search emails with notmuch"""
     if args.thread:
-        # Thread view: show full threads matching the query
         result = subprocess.run(
             ["notmuch", "search", "--format=json", "--output=summary", args.query],
             capture_output=True, text=True
@@ -122,7 +171,6 @@ def cmd_search(args):
         threads = json.loads(result.stdout) if result.stdout.strip() else []
         for thread in threads:
             thread_id = thread.get("thread", "")
-            # Show messages in this thread
             msg_result = subprocess.run(
                 ["notmuch", "show", "--format=json", f"thread:{thread_id}"],
                 capture_output=True, text=True
@@ -151,7 +199,6 @@ def cmd_read(args):
     filepath = get_email_filepath(args.id)
     msg = parse_email_file(filepath)
 
-    # Print headers
     print(f"From: {msg['from']}")
     print(f"To: {msg['to']}")
     if msg['cc']:
@@ -160,7 +207,6 @@ def cmd_read(args):
     print(f"Subject: {msg['subject']}")
     print("-" * 40)
 
-    # Print body
     body = msg.get_body(preferencelist=('plain', 'html'))
     if body:
         content = body.get_content()
@@ -199,7 +245,7 @@ def cmd_extract(args):
                 outpath = TMP_DIR / filename
                 with open(outpath, 'wb') as out:
                     out.write(part.get_payload(decode=True))
-                print(outpath)  # Claude reads this path
+                print(outpath)
                 return
 
     print(f"Attachment not found: {args.filename}", file=sys.stderr)
@@ -214,7 +260,6 @@ def cmd_folders(args):
 
     for entry in sorted(MAIL_DIR.iterdir()):
         if entry.is_dir() and not entry.name.startswith('.'):
-            # Check if it looks like a Maildir (has cur/new/tmp)
             if (entry / "cur").exists() or (entry / "new").exists():
                 count_result = subprocess.run(
                     ["notmuch", "count", f"folder:{entry.name}"],
@@ -223,7 +268,6 @@ def cmd_folders(args):
                 count = count_result.stdout.strip()
                 print(f"{entry.name} ({count} messages)")
             else:
-                # Might be a parent folder with subfolders
                 print(f"{entry.name}/")
                 for sub in sorted(entry.iterdir()):
                     if sub.is_dir() and not sub.name.startswith('.'):
@@ -243,10 +287,10 @@ def main():
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # setup
-    subparsers.add_parser('setup', help='Interactive first-time setup')
+    subparsers.add_parser('setup', help='Add an email account (re-run to add more)')
 
     # sync
-    subparsers.add_parser('sync', help='Sync emails from iCloud via mbsync')
+    subparsers.add_parser('sync', help='Sync all accounts via mbsync')
 
     # search
     p_search = subparsers.add_parser('search', help='Search emails with notmuch query')
